@@ -8,10 +8,53 @@ layered-crust velocity model.
 import numpy as np
 import pandas as pd
 import io
+import ssl
 import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Tuple
+
+
+# ── SSL context — fix macOS CERTIFICATE_VERIFY_FAILED ────────────────────────
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """
+    Crea un SSLContext con il CA bundle corretto.
+    Su macOS il Python dell'App Store / Homebrew non usa i certificati di
+    sistema → CERTIFICATE_VERIFY_FAILED senza un bundle esplicito.
+
+    Strategia (in ordine di preferenza):
+      1. certifi  — bundle CA aggiornato (pip install certifi)
+      2. /etc/ssl/cert.pem  — bundle macOS nativo (Homebrew / sistema)
+      3. /usr/local/etc/openssl@3/cert.pem  — Homebrew OpenSSL
+      4. ssl.create_default_context()  — default Python (funziona se
+         il sistema ha già i certificati configurati correttamente)
+    """
+    import os
+
+    # Tentativo 1: certifi (soluzione preferita)
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+
+    # Tentativo 2: bundle macOS / sistema
+    for ca_path in (
+        "/etc/ssl/cert.pem",                          # macOS nativo
+        "/usr/local/etc/openssl@3/cert.pem",          # Homebrew OpenSSL 3
+        "/usr/local/etc/openssl/cert.pem",            # Homebrew OpenSSL 1.x
+        "/opt/homebrew/etc/openssl@3/cert.pem",       # Homebrew Apple Silicon
+        "/opt/homebrew/etc/openssl/cert.pem",         # Homebrew Apple Silicon 1.x
+    ):
+        if os.path.exists(ca_path):
+            return ssl.create_default_context(cafile=ca_path)
+
+    # Tentativo 3: default Python
+    return ssl.create_default_context()
+
+
+_SSL_CTX = _make_ssl_context()
 
 
 # ── ObsPy MiniSEED helper — bypassa EntryPoint.module_name bug ───────────────
@@ -19,36 +62,38 @@ from typing import Tuple
 def _obspy_read_mseed(buf: io.BytesIO):
     """
     Legge un buffer MiniSEED con ObsPy evitando il bug EntryPoint.module_name
-    (incompatibilità ObsPy < 1.4 con Python >= 3.9 / importlib.metadata >= 3.x).
+    (Python >= 3.9 + ObsPy che usa importlib.metadata entry_points legacy).
 
-    Strategia:
-      1. Prova `obspy.read(buf, format="MSEED")` — formato esplicito, nessun
-         plugin discovery → nessun accesso a entry_point.module_name.
-      2. Fallback: chiama direttamente `obspy.io.mseed.core._read_mseed`.
+    Strategia (in ordine di priorità):
+      1. obspy.io.mseed.core._read_mseed  — lettore interno diretto,
+         bypassa COMPLETAMENTE il sistema entry_points/plugin discovery.
+      2. obspy.core.stream.read con format="MSEED" — formato esplicito,
+         su versioni ObsPy patchate evita il plugin discovery.
+      3. Rilancia l'eccezione del tentativo 1 per diagnostica chiara.
     """
-    try:
-        from obspy import read as _obspy_read
-    except ImportError:
-        raise ImportError("ObsPy non trovato. Installa con: pip install obspy")
-
-    # Tentativo 1: formato esplicito (evita plugin discovery)
-    try:
-        buf.seek(0)
-        return _obspy_read(buf, format="MSEED")
-    except Exception:
-        pass
-
-    # Tentativo 2: lettore interno diretto (bypassa completamente entry_points)
+    # Tentativo 1: lettore MiniSEED interno — nessun entry_point toccato
+    first_exc: Exception | None = None
     try:
         from obspy.io.mseed.core import _read_mseed as _mseed_direct
         buf.seek(0)
         return _mseed_direct(buf)
-    except Exception:
-        pass
+    except ImportError:
+        pass  # ObsPy non installato, proviamo con obspy.read
+    except Exception as e:
+        first_exc = e
 
-    # Tentativo 3: fallback generico (potrebbe fallire con il bug EntryPoint)
-    buf.seek(0)
-    return _obspy_read(buf)
+    # Tentativo 2: obspy.read con formato esplicito
+    try:
+        from obspy import read as _obspy_read
+        buf.seek(0)
+        return _obspy_read(buf, format="MSEED")
+    except ImportError:
+        raise ImportError("ObsPy non trovato. Installa con: pip install obspy")
+    except Exception as e:
+        if first_exc is None:
+            first_exc = e
+
+    raise first_exc  # type: ignore[misc]
 
 
 # ── MiniSEED ─────────────────────────────────────────────────────────────────
@@ -160,7 +205,7 @@ def fetch_fdsn_waveform(
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "SeismicLens/2.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             raw_bytes = resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
