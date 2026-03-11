@@ -995,15 +995,15 @@ def make_spectrogram_fig(t, f, Sxx):
     return fig
 
 
-def make_stalta_fig(t, stalta, threshold):
+def make_stalta_fig(t: np.ndarray, stalta: np.ndarray, threshold: float):
     sta_col  = _c("#bc8cff", "#7030b0")
     thr_col  = _c("#f78166", "#c03020")
     fill_col = _c("rgba(247,129,102,0.12)", "rgba(192,48,32,0.10)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=t, y=stalta, mode="lines",
                              line=dict(color=sta_col, width=1.4), name="STA/LTA"))
-    trigger_mask = stalta > threshold
-    if trigger_mask.any():
+    trigger_mask: np.ndarray = stalta > threshold
+    if np.any(trigger_mask):
         y_fill = np.where(trigger_mask, stalta, np.nan)
         fig.add_trace(go.Scatter(x=t, y=y_fill, mode="lines", fill="tozeroy",
                                  line=dict(color="rgba(0,0,0,0)", width=0),
@@ -1192,7 +1192,7 @@ elif data_source == 2 and uploaded_file:
     except Exception as e:
         st.error(f"{T('error_csv', lang)}: {e}")
 elif data_source == 3 and fdsn_params:
-    _prov = fdsn_params["provider_name"]
+    _prov: str = fdsn_params["provider_name"]
     # Usa cache segnale se disponibile, altrimenti scarica e salva
     if "fdsn_signal" in st.session_state:
         signal_raw = st.session_state["fdsn_signal"]["signal_raw"]

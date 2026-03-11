@@ -14,6 +14,43 @@ import urllib.error
 from typing import Tuple
 
 
+# ── ObsPy MiniSEED helper — bypassa EntryPoint.module_name bug ───────────────
+
+def _obspy_read_mseed(buf: io.BytesIO):
+    """
+    Legge un buffer MiniSEED con ObsPy evitando il bug EntryPoint.module_name
+    (incompatibilità ObsPy < 1.4 con Python >= 3.9 / importlib.metadata >= 3.x).
+
+    Strategia:
+      1. Prova `obspy.read(buf, format="MSEED")` — formato esplicito, nessun
+         plugin discovery → nessun accesso a entry_point.module_name.
+      2. Fallback: chiama direttamente `obspy.io.mseed.core._read_mseed`.
+    """
+    try:
+        from obspy import read as _obspy_read
+    except ImportError:
+        raise ImportError("ObsPy non trovato. Installa con: pip install obspy")
+
+    # Tentativo 1: formato esplicito (evita plugin discovery)
+    try:
+        buf.seek(0)
+        return _obspy_read(buf, format="MSEED")
+    except Exception:
+        pass
+
+    # Tentativo 2: lettore interno diretto (bypassa completamente entry_points)
+    try:
+        from obspy.io.mseed.core import _read_mseed as _mseed_direct
+        buf.seek(0)
+        return _mseed_direct(buf)
+    except Exception:
+        pass
+
+    # Tentativo 3: fallback generico (potrebbe fallire con il bug EntryPoint)
+    buf.seek(0)
+    return _obspy_read(buf)
+
+
 # ── MiniSEED ─────────────────────────────────────────────────────────────────
 
 def load_mseed(file_obj) -> Tuple[np.ndarray, float, dict]:
@@ -26,16 +63,8 @@ def load_mseed(file_obj) -> Tuple[np.ndarray, float, dict]:
     fs       : sampling rate (Hz)
     metadata : dict with network/station/channel/starttime info
     """
-    try:
-        from obspy import read
-    except ImportError:
-        raise ImportError(
-            "ObsPy is required for MiniSEED support. "
-            "Install it with: pip install obspy"
-        )
-
     buf = io.BytesIO(file_obj.read())
-    st = read(buf)
+    st = _obspy_read_mseed(buf)
     st.detrend("demean")
 
     tr = st[0]
@@ -109,14 +138,6 @@ def fetch_fdsn_waveform(
     fs       : sampling rate (Hz)
     metadata : dict with SEED identifiers + timing info
     """
-    try:
-        from obspy import read as obspy_read
-    except ImportError:
-        raise ImportError(
-            "ObsPy is required for FDSN fetch. "
-            "Install it with: pip install obspy"
-        )
-
     base_url = FDSN_PROVIDERS.get(provider_name)
     if base_url is None:
         raise ValueError(f"Unknown FDSN provider: {provider_name!r}. "
@@ -156,7 +177,7 @@ def fetch_fdsn_waveform(
         )
 
     buf = io.BytesIO(raw_bytes)
-    st = obspy_read(buf)
+    st = _obspy_read_mseed(buf)
     st.detrend("demean")
 
     tr = st[0]
@@ -176,6 +197,7 @@ def fetch_fdsn_waveform(
         "fdsn_url":         url,
     }
     return signal, fs, metadata
+
 
 
 # ── CSV ──────────────────────────────────────────────────────────────────────
