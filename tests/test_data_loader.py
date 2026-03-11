@@ -418,7 +418,7 @@ class TestFetchFdsnWaveform(unittest.TestCase):
 
         captured_urls = []
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured_urls.append(req.full_url)
             mock_resp = MagicMock()
             mock_resp.read.return_value = mseed_bytes
